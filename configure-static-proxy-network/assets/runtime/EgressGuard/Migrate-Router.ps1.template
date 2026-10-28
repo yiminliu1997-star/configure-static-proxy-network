@@ -1,0 +1,35 @@
+param([switch]$Restore)
+$ErrorActionPreference='Stop'
+$routerRoot='C:\Users\ExampleUser\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Claude-Model-Router'
+$launcher=Join-Path $routerRoot 'launch-watchdog.ps1'
+$backup=Join-Path $PSScriptRoot 'launch-watchdog.before.ps1'
+$dedicatedNode=Join-Path $PSScriptRoot 'runtime\node.exe'
+if(-not $Restore){
+ $check=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'firewall-install.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+ if(-not $check.Success){throw 'Firewall installation must succeed before migration.'}
+ if(-not (Test-Path -LiteralPath $backup)){Copy-Item -LiteralPath $launcher -Destination $backup}
+ $text=Get-Content -LiteralPath $launcher -Raw -Encoding UTF8
+ $text=$text.Replace('C:\Users\ExampleUser\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe',$dedicatedNode)
+ if(-not $text.Contains($dedicatedNode)){throw 'Unexpected launcher; no changes made.'}
+ [IO.File]::WriteAllText($launcher,$text,[Text.UTF8Encoding]::new($true))
+} else {
+ Copy-Item -LiteralPath $backup -Destination $launcher -Force
+}
+Stop-ScheduledTask -TaskName 'Claude Model Router Watchdog'
+$tasks=@(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -and ($_.CommandLine.Contains((Join-Path $routerRoot 'watchdog.mjs')) -or $_.CommandLine.Contains((Join-Path $routerRoot 'router.mjs'))) })
+# Stop only this router's supervisor first, then its worker. Never stop all Node processes.
+foreach($p in @($tasks | Sort-Object @{Expression={if($_.CommandLine.Contains('watchdog.mjs')){0}else{1}}})){
+ $live=Get-CimInstance Win32_Process -Filter ('ProcessId='+$p.ProcessId)
+ if($live -and $live.CommandLine -eq $p.CommandLine){Stop-Process -Id $p.ProcessId -Force}
+}
+Start-ScheduledTask -TaskName 'Claude Model Router Watchdog'
+$deadline=(Get-Date).AddSeconds(25)
+do {
+ Start-Sleep -Milliseconds 500
+ $listener=Get-NetTCPConnection -LocalPort 18791 -State Listen -ErrorAction SilentlyContinue
+} while(-not $listener -and (Get-Date) -lt $deadline)
+if(-not $listener){throw 'Router did not start; backup is available.'}
+$running=Get-CimInstance Win32_Process -Filter ('ProcessId='+$listener.OwningProcess)
+if(-not $Restore -and $running.ExecutablePath -ne $dedicatedNode){throw 'Router still uses the shared runtime.'}
+$proxy=Invoke-RestMethod -Uri 'http://127.0.0.1:18791/proxy-check' -TimeoutSec 20
+[pscustomobject]@{Time=(Get-Date).ToString('o');Restored=[bool]$Restore;ProcessId=$running.ProcessId;Executable=$running.ExecutablePath;ProxyCheck=$proxy} | ConvertTo-Json -Depth 5 | Tee-Object -FilePath (Join-Path $PSScriptRoot 'router-migration.json')

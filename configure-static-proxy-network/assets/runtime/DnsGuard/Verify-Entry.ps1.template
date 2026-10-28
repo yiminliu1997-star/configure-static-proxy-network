@@ -1,0 +1,27 @@
+function Test-ProxyEntry([string]$Address) {
+ $parent=Split-Path $PSScriptRoot -Parent
+ $port=12561
+ if(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue){throw 'Entry probe port is occupied'}
+ $credential=Import-Clixml -LiteralPath (Join-Path $parent 'credential.xml')
+ $dir=Join-Path $PSScriptRoot ('entry-probe-'+[guid]::NewGuid().ToString('N'))
+ New-Item -ItemType Directory -Path $dir | Out-Null
+ $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ & icacls.exe $dir /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' | Out-Null
+ if($LASTEXITCODE -ne 0){throw 'Cannot protect probe directory'}
+ $file=Join-Path $dir 'runtime.json'; $process=$null
+ try {
+  $config=@{log=@{level='error'};inbounds=@(@{type='mixed';listen='127.0.0.1';listen_port=$port});outbounds=@(@{type = '__PROXY_CORE_TYPE__'; tag = 'proxy';server=$Address;server_port=__PROXY_UPSTREAM_PORT__;username=$credential.UserName;password=$credential.GetNetworkCredential().Password;__PROXY_TRANSPORT_PS__});route=@{final='proxy'}}
+  [IO.File]::WriteAllText($file,($config | ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+  $exe=Join-Path $parent 'proxy-core.exe'
+  & $exe check -c $file 2>&1 | Out-Null
+  if($LASTEXITCODE -ne 0){return $false}
+  $process=Start-Process -FilePath $exe -ArgumentList @('run','-c',('"'+$file+'"')) -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $dir 'error.log')
+  Start-Sleep -Milliseconds 700
+  $answer=Invoke-RestMethod -Uri '__PROXY_CHECK_URL__' -Proxy ('http://127.0.0.1:'+$port) -TimeoutSec 20
+  return ($answer.ip -eq '__PROXY_EXIT_IP__')
+ } catch {return $false} finally {
+  if($process){Stop-Process -Id $process.Id -ErrorAction SilentlyContinue}
+  if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force}
+  $credential=$null;$config=$null
+ }
+}

@@ -1,0 +1,85 @@
+param([ValidateSet('Install','Restore')][string]$Action='Install')
+$ErrorActionPreference='Stop'
+$root=$PSScriptRoot
+$backup=Join-Path $root 'system.before.json'
+$group='StaticProxy-DnsGuard-v1'
+$ranges=@('0.0.0.0-126.255.255.255','128.0.0.0-255.255.255.255','::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
+$identity='__CURRENT_USER_SID__'
+$edgeKey='Registry::HKEY_USERS\'+$identity+'\Software\Policies\Microsoft\Edge'
+function Restore-Settings {
+ Get-NetFirewallRule -Group $group -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+ $saved=Get-Content -LiteralPath $backup -Raw -Encoding UTF8 | ConvertFrom-Json
+ foreach($adapter in $saved.Adapters){
+  $current=Get-NetAdapter | Where-Object InterfaceGuid -eq $adapter.Guid
+  if(-not $current){continue}
+  foreach($family in @('IPv4','IPv6')){
+   $config=Get-DnsClientServerAddress -InterfaceIndex $current.ifIndex -AddressFamily $family
+   $entry=$adapter.$family
+   if($entry.Static -and @($entry.Servers).Count){$config | Set-DnsClientServerAddress -ServerAddresses @($entry.Servers)}
+   else {$config | Set-DnsClientServerAddress -ResetServerAddresses}
+  }
+ }
+ foreach($item in $saved.Edge){if($item.Exists){Set-ItemProperty -LiteralPath $edgeKey -Name $item.Name -Value $item.Value}else{Remove-ItemProperty -LiteralPath $edgeKey -Name $item.Name -ErrorAction SilentlyContinue}}
+}
+try {
+ $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+ if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Administrator authorization required'}
+ if($Action -eq 'Restore') {
+  Restore-Settings
+  Stop-ScheduledTask -TaskName 'StaticProxy-DNS' -ErrorAction SilentlyContinue
+  Disable-ScheduledTask -TaskName 'StaticProxy-DNS' -ErrorAction SilentlyContinue | Out-Null
+  $pidFile=Join-Path $root 'dns.pid'
+  if(Test-Path -LiteralPath $pidFile){
+   $dnsPid=[int](Get-Content -LiteralPath $pidFile -Raw)
+   $running=Get-CimInstance Win32_Process -Filter ('ProcessId='+$dnsPid)
+   if($running -and $running.ExecutablePath -eq (Join-Path $root 'dns-core.exe') -and $running.CommandLine.Contains((Join-Path $root 'dns-config.json'))){Stop-Process -Id $dnsPid -Force}
+  }
+  @{Success=$true;Action=$Action}|ConvertTo-Json|Set-Content (Join-Path $root 'system-result.json');exit 0
+ }
+ $addresses=@(Resolve-DnsName api.anthropic.com -Server 127.0.0.1 -DnsOnly -NoHostsFile -Type A -ErrorAction Stop | Where-Object IPAddress)
+ if($addresses.Count -eq 0){throw 'Local DNS health check failed; system DNS untouched'}
+ $pins=@(Resolve-DnsName __PROXY_UPSTREAM_HOST__ -Server 127.0.0.1 -DnsOnly -NoHostsFile -Type A -ErrorAction Stop | Where-Object IPAddress)
+ if($pins.Count -eq 0){throw 'Bootstrap health check failed'}
+ $exit=Invoke-RestMethod -Uri '__PROXY_CHECK_URL__' -Proxy 'http://127.0.0.1:12460' -TimeoutSec 20
+ if($exit.ip -ne '__PROXY_EXIT_IP__'){throw 'Unexpected proxy exit; no changes made'}
+ $adapters=@(Get-NetAdapter | Where-Object Status -eq 'Up')
+ if(-not(Test-Path -LiteralPath $backup)){
+  $rows=@(foreach($adapter in $adapters){
+   $v4=Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4
+   $v6=Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv6
+   $reg4=Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\'+$adapter.InterfaceGuid)
+   $reg6=Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters\Interfaces\'+$adapter.InterfaceGuid) -ErrorAction SilentlyContinue
+   @{Guid=[string]$adapter.InterfaceGuid;Name=$adapter.Name;IPv4=@{Servers=@($v4.ServerAddresses);Static=[bool]$reg4.NameServer};IPv6=@{Servers=@($v6.ServerAddresses);Static=[bool]$reg6.NameServer}}
+  })
+  $edge=@(foreach($name in @('DnsOverHttpsMode','NetworkPredictionOptions')){
+   $key=Get-Item -LiteralPath $edgeKey -ErrorAction SilentlyContinue
+   $exists=$key -and $key.GetValueNames() -contains $name
+   @{Name=$name;Exists=[bool]$exists;Value=$(if($exists){$key.GetValue($name)}else{$null})}
+  })
+  @{Adapters=$rows;Edge=$edge;Time=(Get-Date).ToString('o')}|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $backup -Encoding UTF8
+ }
+ foreach($adapter in $adapters){Set-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -ServerAddresses @('127.0.0.1','::1')}
+ New-Item -Path $edgeKey -Force | Out-Null
+ New-ItemProperty -LiteralPath $edgeKey -Name DnsOverHttpsMode -PropertyType String -Value 'off' -Force | Out-Null
+ New-ItemProperty -LiteralPath $edgeKey -Name NetworkPredictionOptions -PropertyType DWord -Value 2 -Force | Out-Null
+ foreach($protocol in @('TCP','UDP')){
+  $name='ProxyDnsGuard-'+$protocol
+  if(-not(Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue)){
+   New-NetFirewallRule -Name $name -DisplayName ('Proxy DNS only: block direct '+$protocol+' DNS') -Group $group -Direction Outbound -Action Block -Profile Any -Protocol $protocol -RemotePort @('53','853') -RemoteAddress $ranges | Out-Null
+  }
+ }
+ $core=Join-Path $root 'dns-core.exe'
+ if(-not(Get-NetFirewallRule -Name 'ProxyDnsGuard-Core' -ErrorAction SilentlyContinue)){
+  New-NetFirewallRule -Name 'ProxyDnsGuard-Core' -DisplayName 'Proxy DNS forwarder: local proxy only' -Group $group -Direction Outbound -Action Block -Profile Any -Protocol Any -Program $core -RemoteAddress $ranges | Out-Null
+ }
+ $resolved=@(Resolve-DnsName ('www.microsoft.com') -DnsOnly -NoHostsFile -Type A -ErrorAction Stop | Where-Object IPAddress)
+ if($resolved.Count -eq 0){throw 'Post-install DNS check failed'}
+ $check=Invoke-RestMethod -Uri '__PROXY_CHECK_URL__' -Proxy 'http://127.0.0.1:12460' -TimeoutSec 20
+ if($check.ip -ne '__PROXY_EXIT_IP__'){throw 'Post-install proxy check failed'}
+ @{Success=$true;Action=$Action;Time=(Get-Date).ToString('o');ExitIP=$check.ip;Adapters=@($adapters.Name);Dns=@('127.0.0.1','::1')}|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $root 'system-result.json') -Encoding UTF8
+} catch {
+ $errorText=$_.Exception.Message
+ if($Action -eq 'Install' -and (Test-Path -LiteralPath $backup)){try {Restore-Settings}catch{$errorText+='; Restore error: '+$_.Exception.Message}}
+ @{Success=$false;Action=$Action;Error=$errorText}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $root 'system-result.json') -Encoding UTF8
+ exit 1
+}

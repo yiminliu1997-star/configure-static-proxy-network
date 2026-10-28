@@ -1,0 +1,11 @@
+$ErrorActionPreference='Stop'
+try {
+$user=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+$a=New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSScriptRoot+'\Probe.ps1"')
+$p=New-ScheduledTaskPrincipal -UserId $user -LogonType S4U -RunLevel Limited
+if(Get-ScheduledTask -TaskName 'StaticProxy-NonInteractive-Probe' -ErrorAction SilentlyContinue){throw 'Probe task already exists'}
+Register-ScheduledTask -TaskName 'StaticProxy-NonInteractive-Probe' -Action $a -Principal $p -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2))|Out-Null
+Start-ScheduledTask -TaskName 'StaticProxy-NonInteractive-Probe'
+@{Registered=$true}|ConvertTo-Json|Set-Content (Join-Path $PSScriptRoot 'registration.json')
+} catch {@{Registered=$false;Error=$_.Exception.Message}|ConvertTo-Json|Set-Content (Join-Path $PSScriptRoot 'registration.json')}
+

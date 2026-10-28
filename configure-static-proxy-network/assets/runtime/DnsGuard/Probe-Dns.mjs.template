@@ -1,0 +1,8 @@
+import dns from 'node:dns/promises';
+const port=process.argv[2]||'15353';
+const resolver=new dns.Resolver({timeout:8000,tries:1});
+resolver.setServers([`127.0.0.1:${port}`]);
+for(const host of ['api.anthropic.com','claude.ai','__PROXY_UPSTREAM_HOST__','__PROXY_CHECK_HOST__']) {
+ try { console.log(JSON.stringify({host,addresses:await resolver.resolve4(host)})); }
+ catch(e) {console.log(JSON.stringify({host,error:e.code}));process.exitCode=1;}
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "配置 通用静态代理（通用版）"
+  short_description: "按用户指定的 代理出口和接入参数生成配置，迁移网络保护并核验实际出口"
+  default_prompt: "使用 $configure-static-proxy-network，先确认我的目标静态 IP 和接入参数，再配置此电脑并完成核验，保留当前连接和 ToDesk。"

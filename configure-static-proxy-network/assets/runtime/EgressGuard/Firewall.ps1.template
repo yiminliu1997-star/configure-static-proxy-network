@@ -1,0 +1,53 @@
+param([ValidateSet('Install','Remove','Audit')][string]$Action='Audit')
+$ErrorActionPreference='Stop'
+$group='StaticProxy-Claude-Edge-EgressGuard-v1'
+$manifest=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'targets.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$resultFile=Join-Path $PSScriptRoot ('firewall-'+$Action.ToLower()+'.json')
+# Block every non-loopback destination, on every protocol and firewall profile.
+# Do not use a Block Any + Allow proxy pair: Windows explicit Block wins.
+$ranges=@('0.0.0.0-126.255.255.255','128.0.0.0-255.255.255.255','::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff')
+$created=[System.Collections.Generic.List[string]]::new()
+try {
+ if($Action -ne 'Audit') {
+  $principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+  if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Administrator authorization is required to change Windows Firewall.'}
+ }
+ if($Action -eq 'Remove') {
+  Get-NetFirewallRule -Group $group -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  @{Action=$Action;Success=$true;Time=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $resultFile -Encoding UTF8
+  exit 0
+ }
+ $profiles=@(Get-NetFirewallProfile -PolicyStore ActiveStore)
+ if(@($profiles | Where-Object {$_.Enabled -ne 'True'}).Count){throw 'A Windows Firewall profile is disabled; no global profile changes will be made.'}
+ foreach($target in $manifest.Targets) {
+  $path=[IO.Path]::GetFullPath($target.Path)
+  if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw ('Missing target: '+$path)}
+  if($path -match '(?i)(codex|proxy-core)\.exe$' -or $path -eq $manifest.SharedNode){throw 'Refusing to restrict the active chat or shared runtime.'}
+  if($Action -eq 'Install') {
+   $existing=Get-NetFirewallRule -Name $target.RuleName -ErrorAction SilentlyContinue
+   if($existing){
+    $filter=$existing | Get-NetFirewallApplicationFilter
+    if($existing.Group -ne $group -or $filter.Program -ne $path){throw 'Conflicting existing rule; refusing to overwrite.'}
+   } else {
+    New-NetFirewallRule -Name $target.RuleName -DisplayName ('Proxy only: '+$target.Label) -Group $group -Description 'Blocks non-loopback IPv4 and IPv6. Local Proxy proxy remains reachable. Does not affect Codex or proxy-core.' -Direction Outbound -Action Block -Enabled True -Profile Any -Protocol Any -Program $path -RemoteAddress $ranges -PolicyStore PersistentStore | Out-Null
+    $created.Add($target.RuleName)
+   }
+  }
+ }
+ $rows=@(foreach($target in $manifest.Targets){
+  $rule=Get-NetFirewallRule -PolicyStore ActiveStore -Name $target.RuleName -ErrorAction Stop
+  $app=$rule | Get-NetFirewallApplicationFilter
+  $addr=$rule | Get-NetFirewallAddressFilter
+  $port=$rule | Get-NetFirewallPortFilter
+  if($rule.Enabled -ne 'True' -or $rule.Action -ne 'Block' -or $rule.Direction -ne 'Outbound' -or $rule.Profile -ne 'Any' -or $app.Program -ne $target.Path -or $port.Protocol -ne 'Any'){throw ('Rule audit failed: '+$target.Label)}
+  if(@(Compare-Object @($addr.RemoteAddress) $ranges).Count){throw ('Address audit failed: '+$target.Label)}
+  [pscustomobject]@{Label=$target.Label;RuleName=$rule.Name;Program=$app.Program;Enabled=[string]$rule.Enabled;Action=[string]$rule.Action;Profile=[string]$rule.Profile;RemoteAddress=$addr.RemoteAddress}
+ })
+ @{Action=$Action;Success=$true;Time=(Get-Date).ToString('o');Rules=$rows;Scope='Listed executable paths only; new versions and other child executable paths require review.'} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $resultFile -Encoding UTF8
+ Write-Output ('Verified '+$rows.Count+' application rules.')
+} catch {
+ foreach($name in $created){Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue}
+ @{Action=$Action;Success=$false;Time=(Get-Date).ToString('o');Error=$_.Exception.Message;RolledBackNewRules=@($created)} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $resultFile -Encoding UTF8
+ Write-Error $_
+ exit 1
+}

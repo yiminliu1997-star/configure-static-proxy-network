@@ -1,0 +1,5 @@
+$ErrorActionPreference='Stop'
+# Disable only the configuration watcher; preserve proxy, DNS and firewall.
+Disable-ScheduledTask -TaskName 'StaticProxy-SystemProxyGuard' | Out-Null
+Stop-ScheduledTask -TaskName 'StaticProxy-SystemProxyGuard'
+Write-Output 'System proxy watcher disabled. Current proxy, DNS and firewall settings were preserved.'

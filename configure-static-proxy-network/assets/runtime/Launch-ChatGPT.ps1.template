@@ -1,0 +1,54 @@
+param([switch]$VerifyOnly)
+$ErrorActionPreference = 'Stop'
+
+try {
+    # Override inherited values before launching the app and its Codex subprocesses.
+    foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {
+        [Environment]::SetEnvironmentVariable($name,'http://127.0.0.1:12460','Process')
+    }
+    [Environment]::SetEnvironmentVariable('NO_PROXY','localhost,127.0.0.1,::1','Process')
+
+    $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $package) { throw 'ChatGPT desktop package OpenAI.Codex was not found.' }
+    $appExe = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
+    if (-not (Test-Path -LiteralPath $appExe)) { throw 'ChatGPT executable was not found.' }
+
+    if ($VerifyOnly) {
+        & (Join-Path $PSScriptRoot 'Control.ps1') -Action Test
+        [pscustomobject]@{
+            AppExists = $true
+            ChildHTTPProxy = $env:HTTP_PROXY
+            ChildHTTPSProxy = $env:HTTPS_PROXY
+            ChildALLProxy = $env:ALL_PROXY
+            LaunchSkipped = $true
+        } | ConvertTo-Json -Compress
+        return
+    }
+
+    if (Get-Process -Name ChatGPT -ErrorAction SilentlyContinue) {
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][System.Windows.Forms.MessageBox]::Show(
+            'Please fully quit ChatGPT from its app/tray menu first, then run this shortcut again. Closing only the window may leave it running. No processes have been terminated.',
+            'ChatGPT - Proxy Direct')
+        return
+    }
+
+    & (Join-Path $PSScriptRoot 'Control.ps1') -Action Enable
+    # This opens the interactive application requested by the user.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $appExe
+    $startInfo.WorkingDirectory = $package.InstallLocation
+    $startInfo.UseShellExecute = $false
+    foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {
+        $startInfo.EnvironmentVariables[$name] = 'http://127.0.0.1:12460'
+    }
+    $startInfo.EnvironmentVariables['NO_PROXY'] = 'localhost,127.0.0.1,::1'
+    $started = [System.Diagnostics.Process]::Start($startInfo)
+    [pscustomobject]@{ StartedAt = (Get-Date).ToString('o'); RequestedPid = $started.Id; Proxy = $env:HTTPS_PROXY } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'last-app-launch.json') -Encoding UTF8
+} catch {
+    $_.Exception.Message | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'launcher-error.txt') -Encoding UTF8
+    if ($VerifyOnly) { throw }
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'ChatGPT - Proxy Direct')
+    exit 1
+}

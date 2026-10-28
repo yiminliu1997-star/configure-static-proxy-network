@@ -1,0 +1,190 @@
+param([ValidateSet('Enable','Restore','Start','Test','Worker')][string]$Action = 'Enable')
+$ErrorActionPreference = 'Stop'
+$taskDir = $PSScriptRoot
+$corePath = Join-Path $taskDir 'proxy-core.exe'
+$proxyAddress = 'http://127.0.0.1:12460'
+$internetKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$backupPath = Join-Path $taskDir 'original-settings.json'
+$pidPath = Join-Path $taskDir 'core.pid'
+. (Join-Path $taskDir 'Windows-Proxy.ps1')
+
+function Notify-Settings {
+    if (-not ('Proxy.Native' -as [type])) {
+        Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+namespace Proxy {
+ public class Native {
+  [DllImport("wininet.dll", SetLastError=true)] public static extern bool InternetSetOption(IntPtr h,int option,IntPtr buffer,int length);
+  [DllImport("user32.dll", CharSet=CharSet.Auto, SetLastError=true)] public static extern IntPtr SendMessageTimeout(IntPtr h,uint msg,UIntPtr w,string l,uint flags,uint timeout,out UIntPtr result);
+ }
+}
+'@
+    }
+    [void][Proxy.Native]::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0)
+    [void][Proxy.Native]::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)
+    $result = [UIntPtr]::Zero
+    [void][Proxy.Native]::SendMessageTimeout([IntPtr]0xffff,0x1a,[UIntPtr]::Zero,'Environment',2,2000,[ref]$result)
+}
+
+function Test-Exit {
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.Proxy = New-Object System.Net.WebProxy($proxyAddress)
+    $handler.UseProxy = $true
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(25)
+    try {
+        $response = $client.GetStringAsync('__PROXY_CHECK_URL__').GetAwaiter().GetResult() | ConvertFrom-Json
+        if ($response.ip -ne '__PROXY_EXIT_IP__') { throw 'Unexpected exit IP. System proxy was not changed.' }
+        Write-Output ('Verified Proxy exit: ' + $response.ip)
+        # The exact-exit HTTPS request already verifies the proxy. A target-specific
+        # Microsoft rejection must not prevent the system proxy from being enabled.
+    } finally { $client.Dispose(); $handler.Dispose() }
+}
+
+function Start-CoreProcess {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 12460 -ErrorAction SilentlyContinue
+    if ($listener) {
+        $owner = Get-Process -Id $listener[0].OwningProcess -ErrorAction Stop
+        if ($owner.Path -ne $corePath) { throw 'Local port 12460 is occupied by another application.' }
+        return
+    }
+    $credential = Import-Clixml -LiteralPath (Join-Path $taskDir 'credential.xml')
+    $pins = Get-Content -LiteralPath (Join-Path $taskDir 'DnsGuard\bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (@($pins.Addresses).Count -eq 0) { throw 'No bootstrap addresses available.' }
+    $config = @{
+        log = @{ level = 'warn'; timestamp = $true }
+        dns = @{ servers = @(@{ type = 'hosts'; tag = 'bootstrap'; predefined = @{'__PROXY_UPSTREAM_HOST__' = @($pins.Addresses)} }) }
+        inbounds = @(@{ type = 'mixed'; tag = 'local'; listen = '127.0.0.1'; listen_port = 12460 })
+        outbounds = @(@{ type = '__PROXY_CORE_TYPE__'; tag = 'proxy'; server = '__PROXY_UPSTREAM_HOST__'; server_port = __PROXY_UPSTREAM_PORT__; username = $credential.UserName; password = $credential.GetNetworkCredential().Password; __PROXY_TRANSPORT_PS__ })
+        route = @{ final = 'proxy'; default_domain_resolver = 'bootstrap' }
+    }
+    $runtimePath = Join-Path $taskDir 'runtime.json'
+    try {
+        $json = $config | ConvertTo-Json -Depth 12
+        [IO.File]::WriteAllText($runtimePath, $json, (New-Object Text.UTF8Encoding($false)))
+        $checkOutput = & $corePath check -c $runtimePath 2>&1
+        if ($LASTEXITCODE -ne 0) { throw 'Proxy configuration validation failed.' }
+        $process = Start-Process -FilePath $corePath -ArgumentList @('run','-c',('"' + $runtimePath + '"'),'--disable-color') -WorkingDirectory $taskDir -WindowStyle Hidden -RedirectStandardOutput (Join-Path $taskDir 'core.stdout.log') -RedirectStandardError (Join-Path $taskDir 'core.stderr.log') -PassThru
+        $process.Id | Set-Content -LiteralPath $pidPath -Encoding ASCII
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            Start-Sleep -Milliseconds 200
+            $process.Refresh()
+            if ($process.HasExited) { throw 'Proxy process exited during startup.' }
+            $listener = Get-NetTCPConnection -State Listen -LocalPort 12460 -ErrorAction SilentlyContinue
+            if ($listener -and $listener[0].OwningProcess -eq $process.Id) { $ready = $true; break }
+        }
+        if (-not $ready) { Stop-Process -Id $process.Id -ErrorAction SilentlyContinue; throw 'Proxy startup timed out.' }
+    } finally {
+        if (Test-Path -LiteralPath $runtimePath) { Remove-Item -LiteralPath $runtimePath -Force }
+        $credential = $null; $config = $null; $json = $null; $checkOutput = $null
+    }
+}
+
+function Start-Core {
+    # Task Scheduler owns the worker, so closing ChatGPT cannot kill the proxy.
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 12460 -ErrorAction SilentlyContinue
+    if ($listener) {
+        $owner = Get-Process -Id $listener[0].OwningProcess -ErrorAction Stop
+        if ($owner.Path -ne $corePath) { throw 'Local port 12460 is occupied by another application.' }
+        return
+    }
+    Enable-ScheduledTask -TaskName 'StaticProxy-Proxy' | Out-Null
+    Start-ScheduledTask -TaskName 'StaticProxy-Proxy'
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        Start-Sleep -Milliseconds 250
+        $listener = Get-NetTCPConnection -State Listen -LocalPort 12460 -ErrorAction SilentlyContinue
+        if ($listener) {
+            $owner = Get-Process -Id $listener[0].OwningProcess -ErrorAction Stop
+            if ($owner.Path -eq $corePath) { return }
+            throw 'Local port 12460 is occupied by another application.'
+        }
+    }
+    throw 'Independent proxy task did not start. Check worker-error.txt.'
+}
+
+function Save-Original {
+    if (Test-Path -LiteralPath $backupPath) { return }
+    $key = Get-Item -LiteralPath $internetKey
+    $registryValues = @{}
+    foreach ($name in @('ProxyEnable','ProxyServer','ProxyOverride','AutoConfigURL')) {
+        $exists = $key.GetValueNames() -contains $name
+        $registryValues[$name] = @{ Exists = $exists; Value = $key.GetValue($name) }
+    }
+    $environmentValues = @{}
+    foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY')) {
+        $environmentValues[$name] = [Environment]::GetEnvironmentVariable($name,'User')
+    }
+    @{ Registry = $registryValues; Environment = $environmentValues; SavedAt = (Get-Date).ToString('o') } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $backupPath -Encoding UTF8
+}
+
+function Apply-ProxySettings {
+    # WinINet updates both legacy registry values and the per-connection settings
+    # consumed by Chromium. Writing ProxyEnable alone can leave browsers direct.
+    [Proxy.WindowsProxy]::Set(3, '127.0.0.1:12460', 'localhost;127.*;[::1];<local>', '')
+    foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) { [Environment]::SetEnvironmentVariable($name,$proxyAddress,'User') }
+    [Environment]::SetEnvironmentVariable('NO_PROXY','localhost,127.0.0.1,::1','User')
+    # The independent scheduled task now handles login startup.
+    Remove-ItemProperty -LiteralPath $runKey -Name StaticProxy -ErrorAction SilentlyContinue
+    Notify-Settings
+}
+
+try {
+    switch ($Action) {
+        'Worker' {
+            while ($true) {
+                try {
+                    Start-CoreProcess
+                    Test-Exit
+                    Apply-ProxySettings
+                    [pscustomobject]@{ ReadyAt = (Get-Date).ToString('o'); Proxy = $proxyAddress; WorkerPid = $PID } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskDir 'worker-ready.json') -Encoding UTF8
+                    $workerCorePid = [int](Get-NetTCPConnection -State Listen -LocalPort 12460 | Select-Object -First 1 -ExpandProperty OwningProcess)
+                    Wait-Process -Id $workerCorePid -ErrorAction SilentlyContinue
+                } catch {
+                    ((Get-Date).ToString('o') + ' ' + $_.Exception.Message) | Set-Content -LiteralPath (Join-Path $taskDir 'worker-error.txt') -Encoding UTF8
+                }
+                Start-Sleep -Seconds 5
+            }
+        }
+        'Start' { Start-Core; Test-Exit }
+        'Test' { Test-Exit }
+        'Enable' {
+            Save-Original
+            Enable-ScheduledTask -TaskName 'StaticProxy-Proxy' | Out-Null
+            Start-Core
+            Test-Exit
+            Apply-ProxySettings
+            Write-Output 'Proxy direct enabled; local proxy 127.0.0.1:12460; login startup enabled.'
+        }
+        'Restore' {
+            $backup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+            $restoreFlags = 1
+            if ($backup.Registry.ProxyEnable.Value -eq 1) { $restoreFlags = $restoreFlags -bor 2 }
+            if ($backup.Registry.AutoConfigURL.Exists -and $backup.Registry.AutoConfigURL.Value) { $restoreFlags = $restoreFlags -bor 4 }
+            [Proxy.WindowsProxy]::Set($restoreFlags, $backup.Registry.ProxyServer.Value, $backup.Registry.ProxyOverride.Value, $backup.Registry.AutoConfigURL.Value)
+            foreach ($property in $backup.Registry.PSObject.Properties) {
+                if ($property.Value.Exists) {
+                    Set-ItemProperty -LiteralPath $internetKey -Name $property.Name -Value $property.Value.Value
+                } else { Remove-ItemProperty -LiteralPath $internetKey -Name $property.Name -ErrorAction SilentlyContinue }
+            }
+            foreach ($property in $backup.Environment.PSObject.Properties) { [Environment]::SetEnvironmentVariable($property.Name,$property.Value,'User') }
+            Remove-ItemProperty -LiteralPath $runKey -Name StaticProxy -ErrorAction SilentlyContinue
+            Notify-Settings
+            Disable-ScheduledTask -TaskName 'StaticProxy-Proxy' | Out-Null
+            Stop-ScheduledTask -TaskName 'StaticProxy-Proxy'
+            if (Test-Path -LiteralPath $pidPath) {
+                $corePid = [int](Get-Content -LiteralPath $pidPath -Raw)
+                $process = Get-Process -Id $corePid -ErrorAction SilentlyContinue
+                if ($process -and $process.Path -eq $corePath) { Stop-Process -Id $corePid }
+            }
+            Write-Output 'Original proxy settings restored; Proxy login startup disabled.'
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $taskDir 'last-error.txt') -ErrorAction SilentlyContinue
+} catch {
+    ('Action ' + $Action + ' failed: ' + $_.Exception.Message) | Set-Content -LiteralPath (Join-Path $taskDir 'last-error.txt') -Encoding UTF8
+    throw
+}

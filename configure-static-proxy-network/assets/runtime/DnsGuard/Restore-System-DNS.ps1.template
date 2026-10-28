@@ -1,0 +1,3 @@
+$script=Join-Path $PSScriptRoot 'Configure-System.ps1'
+Start-Process -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File "'+$script+'" -Action Restore') -Wait
+Get-Content -LiteralPath (Join-Path $PSScriptRoot 'system-result.json') -Raw -Encoding UTF8

@@ -1,0 +1,13 @@
+$script:ExpectedServer='127.0.0.1:12460'
+$script:ExpectedBypass='localhost;127.*;[::1];<local>'
+function Get-ProxyGuardState {
+ $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+ $v=Get-ItemProperty -LiteralPath $key
+ $c=Get-ItemProperty -LiteralPath ($key+'\Connections')
+ $flags=if($c.DefaultConnectionSettings.Length -gt 8){[int]$c.DefaultConnectionSettings[8]}else{-1}
+ $effective=[Proxy.WindowsProxy]::Read()
+ [pscustomobject]@{Flags=$flags;Enabled=($v.ProxyEnable -eq 1);ServerMatches=($v.ProxyServer -eq $script:ExpectedServer -and $effective[2] -eq $script:ExpectedServer);BypassMatches=($v.ProxyOverride -eq $script:ExpectedBypass -and $effective[3] -eq $script:ExpectedBypass);PacEmpty=([string]::IsNullOrEmpty($v.AutoConfigURL) -and [string]::IsNullOrEmpty($effective[1]));AutoDetectOff=($effective[0] -eq 'False')}
+}
+function Test-ProxyGuardState($State) {
+ return ($State.Flags -eq 3 -and $State.Enabled -and $State.ServerMatches -and $State.BypassMatches -and $State.PacEmpty -and $State.AutoDetectOff)
+}

@@ -1,0 +1,38 @@
+param([string]$Label='baseline',[int]$Seconds=35,[switch]$IncludeProxyControl,[switch]$AllComponents)
+$ErrorActionPreference='Stop'
+$base=Join-Path $PSScriptRoot $Label
+$started=$false
+$filters=@()
+try {
+ $status=& pktmon status 2>&1
+ $status | Set-Content -LiteralPath ($base+'-status.txt') -Encoding UTF8
+ # Do not stop or replace an existing capture. pktmon rejects a second start.
+ $ports=@(53,853,5353,5355,137)
+ if($IncludeProxyControl){$ports+=__PROXY_UPSTREAM_PORT__}
+ foreach($port in $ports){
+  $name='ProxyDnsAudit'+$port
+  & pktmon filter add $name -p $port | Out-Null
+  if($LASTEXITCODE -ne 0){throw 'Could not create DNS capture filter.'}
+  $filters+=$name
+ }
+ & pktmon list | Set-Content -LiteralPath ($base+'-components.txt') -Encoding UTF8
+ & pktmon filter list | Set-Content -LiteralPath ($base+'-filters.txt') -Encoding UTF8
+ $components='nics'
+ if($AllComponents){$components='all'}
+ & pktmon start --capture --comp $components --pkt-size 512 --file-size 16 --file-name ($base+'.etl') | Set-Content -LiteralPath ($base+'-start-output.txt') -Encoding UTF8
+ if($LASTEXITCODE -ne 0){throw 'Capture could not start. Existing captures are not stopped.'}
+ $started=$true
+ @{Started=$true;Time=(Get-Date).ToString('o');Seconds=$Seconds} | ConvertTo-Json | Set-Content -LiteralPath ($base+'-started.json') -Encoding UTF8
+ Start-Sleep -Seconds $Seconds
+ & pktmon counters | Set-Content -LiteralPath ($base+'-counters.txt') -Encoding UTF8
+ & pktmon stop | Set-Content -LiteralPath ($base+'-stop-output.txt') -Encoding UTF8
+ $started=$false
+ & pktmon etl2txt ($base+'.etl') --out ($base+'.txt') | Out-Null
+ & pktmon etl2pcap ($base+'.etl') --out ($base+'.pcapng') | Out-Null
+ @{Success=$true;Time=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath ($base+'-done.json') -Encoding UTF8
+} catch {
+ @{Success=$false;Error=$_.Exception.Message} | ConvertTo-Json | Set-Content -LiteralPath ($base+'-done.json') -Encoding UTF8
+} finally {
+ if($started){& pktmon stop | Out-Null}
+ foreach($name in $filters){& pktmon filter remove $name | Out-Null}
+}

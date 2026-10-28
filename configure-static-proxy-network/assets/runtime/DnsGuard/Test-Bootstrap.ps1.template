@@ -1,0 +1,24 @@
+$ErrorActionPreference='Stop'
+$root=$PSScriptRoot
+$parent=Split-Path $root -Parent
+$credential=Import-Clixml -LiteralPath (Join-Path $parent 'credential.xml')
+$pins=Get-Content -LiteralPath (Join-Path $root 'bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$config=@{log=@{level='warn'};dns=@{servers=@(@{type='hosts';tag='bootstrap';predefined=@{'__PROXY_UPSTREAM_HOST__'=@($pins.Addresses)}})};inbounds=@(@{type='mixed';tag='probe';listen='127.0.0.1';listen_port=12560});outbounds=@(@{type = '__PROXY_CORE_TYPE__'; tag = 'proxy';server='__PROXY_UPSTREAM_HOST__';server_port=__PROXY_UPSTREAM_PORT__;username=$credential.UserName;password=$credential.GetNetworkCredential().Password;__PROXY_TRANSPORT_PS__});route=@{final='proxy';default_domain_resolver='bootstrap'}}
+$file=Join-Path $root 'bootstrap-probe-runtime.json'
+$process=$null
+try {
+ [IO.File]::WriteAllText($file,($config|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+ $exe=Join-Path $parent 'proxy-core.exe'
+ & $exe check -c $file 2>&1 | Out-Null
+ if($LASTEXITCODE -ne 0){throw 'Bootstrap proxy configuration invalid'}
+ $process=Start-Process -FilePath $exe -ArgumentList @('run','-c',('"'+$file+'"'),'--disable-color') -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $root 'bootstrap-test-error.log')
+ Start-Sleep -Milliseconds 500
+ Remove-Item -LiteralPath $file -Force
+ $answer=Invoke-RestMethod -Uri '__PROXY_CHECK_URL__' -Proxy 'http://127.0.0.1:12560' -TimeoutSec 20
+ if($answer.ip -ne '__PROXY_EXIT_IP__'){throw 'Unexpected bootstrap test exit'}
+ @{Success=$true;Exit=$answer.ip;BootstrapAddresses=$pins.Addresses;MainProxyStopped=$false}|ConvertTo-Json -Depth 4|Tee-Object -FilePath (Join-Path $root 'bootstrap-test.json')
+} finally {
+ if($process){Stop-Process -Id $process.Id -ErrorAction SilentlyContinue}
+ if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force}
+ $credential=$null;$config=$null
+}

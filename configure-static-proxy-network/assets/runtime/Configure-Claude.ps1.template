@@ -1,0 +1,46 @@
+$ErrorActionPreference = 'Stop'
+$root = $PSScriptRoot
+$routerDir = 'C:\Users\ExampleUser\AppData\Local\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\Claude-Model-Router'
+$routerFile = Join-Path $routerDir 'router.mjs'
+$settingsFile = 'C:\Users\ExampleUser\.claude\settings.json'
+$libraryDir = 'C:\Users\ExampleUser\AppData\Local\Claude-3p\configLibrary'
+$meta = Get-Content -LiteralPath (Join-Path $libraryDir '_meta.json') -Raw | ConvertFrom-Json
+if ($meta.appliedId -notmatch '^[a-f0-9-]{36}$') { throw 'Cannot identify applied Claude configuration.' }
+$profileFile = Join-Path $libraryDir ($meta.appliedId + '.json')
+$installFile = Join-Path $root 'claude-proxy-install.json'
+if (Test-Path -LiteralPath $installFile) {
+    $backupDir = (Get-Content -LiteralPath $installFile -Raw | ConvertFrom-Json).BackupDirectory
+} else {
+    $backupDir = Join-Path $root ('claude-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Path $backupDir | Out-Null
+}
+if (-not (Test-Path -LiteralPath (Join-Path $backupDir 'router.mjs'))) { Copy-Item -LiteralPath $routerFile -Destination (Join-Path $backupDir 'router.mjs') }
+$settingsExisted = Test-Path -LiteralPath $settingsFile
+if (-not (Test-Path -LiteralPath (Join-Path $backupDir 'manifest.json'))) {
+    if ($settingsExisted) { Copy-Item -LiteralPath $settingsFile -Destination (Join-Path $backupDir 'settings.json') }
+    @{ SettingsExisted = $settingsExisted; RouterDirectory = $routerDir } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backupDir 'manifest.json') -Encoding UTF8
+}
+if (-not (Test-Path -LiteralPath (Join-Path $backupDir 'desktop-profile.json'))) { Copy-Item -LiteralPath $profileFile -Destination (Join-Path $backupDir 'desktop-profile.json') }
+
+$source = [IO.File]::ReadAllText($routerFile)
+if (-not $source.Contains('claude-egress.mjs')) {
+$needle = "https.request(base+u.pathname+u.search,{method:'POST',headers},response=>{"
+if (-not $source.Contains($needle)) { throw 'Router source differs; no proxy settings changed.' }
+$source = "import {proxyAgent, verifyProxyExit} from './claude-egress.mjs';`n" + $source
+$source = $source.Replace($needle, "https.request(base+u.pathname+u.search,{method:'POST',headers,agent:proxyAgent},response=>{`n fs.appendFileSync(path.join(root,'upstream-route.jsonl'),JSON.stringify({time:new Date().toISOString(),provider:target.provider,host:new URL(base).hostname,status:response.statusCode,proxyPeer:response.socket.remoteAddress,proxyPort:response.socket.remotePort})+'\n');")
+$source = $source.Replace("if(req.url==='/health'){", "if(req.url==='/proxy-check'){try{respond(res,200,await verifyProxyExit());}catch{respond(res,502,{error:'Proxy proxy check failed'});}return;}`n if(req.url==='/health'){")
+Copy-Item -LiteralPath (Join-Path $root 'claude-egress.mjs') -Destination (Join-Path $routerDir 'claude-egress.mjs')
+[IO.File]::WriteAllText($routerFile,$source,(New-Object Text.UTF8Encoding($false)))
+}
+
+$settings = if ($settingsExisted) { Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
+if (-not $settings.env) { $settings | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force }
+foreach ($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) { $settings.env | Add-Member -NotePropertyName $name -NotePropertyValue 'http://127.0.0.1:12460' -Force }
+$settings.env | Add-Member -NotePropertyName NO_PROXY -NotePropertyValue 'localhost,127.0.0.1,::1' -Force
+[IO.File]::WriteAllText($settingsFile,($settings | ConvertTo-Json -Depth 50),(New-Object Text.UTF8Encoding($false)))
+$profile = Get-Content -LiteralPath $profileFile -Raw | ConvertFrom-Json
+$profile | Add-Member -NotePropertyName egressProxyUrl -NotePropertyValue 'http://127.0.0.1:12460' -Force
+$profile.PSObject.Properties.Remove('egressProxyPacUrl')
+[IO.File]::WriteAllText($profileFile,($profile | ConvertTo-Json -Depth 50),(New-Object Text.UTF8Encoding($false)))
+@{ BackupDirectory = $backupDir; RouterDirectory = $routerDir; ProfileFile = $profileFile; Proxy = 'http://127.0.0.1:12460'; ExpectedExit = '__PROXY_EXIT_IP__'; PolicyPending = $false; Method = 'local-profile' } | ConvertTo-Json | Set-Content -LiteralPath $installFile -Encoding UTF8
+Write-Output ('Configured Claude desktop fixed proxy, Code settings, and router. Backup: ' + $backupDir)

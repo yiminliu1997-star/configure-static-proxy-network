@@ -1,0 +1,27 @@
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = path.dirname(fileURLToPath(import.meta.url));
+const install = JSON.parse(fs.readFileSync(path.join(root, 'claude-proxy-install.json'), 'utf8').replace(/^\uFEFF/, ''));
+const secrets = JSON.parse(fs.readFileSync(path.join(install.RouterDirectory, 'secrets.json'), 'utf8').replace(/^\uFEFF/, ''));
+async function check(model, inference = false) {
+  const body = Buffer.from(JSON.stringify({ model, ...(inference ? { max_tokens: 8, stream: false } : {}), messages: [{ role: 'user', content: 'Reply OK only.' }] }));
+  return new Promise((resolve, reject) => {
+    const request = http.request({ hostname: '127.0.0.1', port: 18791, path: inference ? '/v1/messages' : '/v1/messages/count_tokens', method: 'POST',
+      agent: false, headers: { 'content-type': 'application/json', 'content-length': body.length, 'x-api-key': secrets.token } }, response => {
+      response.resume();
+      response.on('end', () => resolve({ model, status: response.statusCode }));
+      response.on('error', reject);
+    });
+    request.setTimeout(30000, () => request.destroy(new Error('API connectivity test timed out')));
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+const probes = process.argv.includes('--apilio-message') ? [['claude-opus-4-7', true]] : [['deepseek-flash', false], ['claude-opus-4-7', false]];
+for (const [model, inference] of probes) {
+  try { console.log(JSON.stringify(await check(model, inference))); }
+  catch (error) { console.log(JSON.stringify({ model, error: error.message })); process.exitCode = 1; }
+}

@@ -1,0 +1,15 @@
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=path.dirname(fileURLToPath(import.meta.url));
+const configDir=path.join(root,'code-test');fs.mkdirSync(configDir,{recursive:true});
+const env={...process.env};
+for(const k of Object.keys(env))if(/^(ANTHROPIC_|CLAUDE_)/i.test(k))delete env[k];
+Object.assign(env,{ANTHROPIC_API_KEY:'proxy-dns-test-invalid-key',CLAUDE_CONFIG_DIR:configDir,CLAUDE_CODE_MAX_RETRIES:'0',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_UPDATES:'1',API_TIMEOUT_MS:'10000'});
+const args=['--bare','--setting-sources','','--settings','C:\\Users\\ExampleUser\\.claude\\settings.json','--strict-mcp-config','--tools','','--disable-slash-commands','--no-session-persistence','--model','claude-sonnet-4-5','--system-prompt','Connectivity test only.','-p','Reply OK.'];
+const child=spawn('C:\\Users\\ExampleUser\\AppData\\Local\\Claude-3p\\claude-code\\2.1.304\\aed62990b91e\\claude.exe',args,{cwd:configDir,env,windowsHide:true,stdio:['ignore','pipe','pipe']});
+fs.writeFileSync(path.join(root,'code-test.pid'),String(child.pid));
+let output='';child.stdout.on('data',c=>output+=c);child.stderr.on('data',c=>output+=c);
+const timer=setTimeout(()=>child.kill(),25000);
+child.on('close',code=>{clearTimeout(timer);const result={code,settingsFile:'C:\\Users\\ExampleUser\\.claude\\settings.json',output:output.slice(-800),reachedApi:/Invalid API key/.test(output)};fs.writeFileSync(path.join(root,'code-test-result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));});

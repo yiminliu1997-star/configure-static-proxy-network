@@ -1,0 +1,17 @@
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=path.dirname(fileURLToPath(import.meta.url));
+const exe='C:\\Users\\ExampleUser\\AppData\\Local\\Claude-3p\\claude-code\\2.1.304\\aed62990b91e\\claude.exe';
+const results=[];
+for(const mode of (process.argv[2]?[process.argv[2]]:['proxy','dead-proxy','direct'])){
+ const dir=path.join(root,'code-test-'+mode);fs.mkdirSync(dir,{recursive:true});
+ const env={...process.env};
+ for(const k of Object.keys(env))if(/^(ANTHROPIC_|CLAUDE_|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$|NO_PROXY$)/i.test(k))delete env[k];
+ Object.assign(env,{CLAUDE_CONFIG_DIR:dir,ANTHROPIC_API_KEY:'proxy-egress-test-invalid-key',ANTHROPIC_BASE_URL:'https://api.anthropic.com',CLAUDE_CODE_MAX_RETRIES:'0',API_TIMEOUT_MS:'8000',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',DISABLE_UPDATES:'1',HTTP_PROXY:mode==='direct'?'':`http://127.0.0.1:${mode==='proxy'?12460:12579}`,HTTPS_PROXY:mode==='direct'?'':`http://127.0.0.1:${mode==='proxy'?12460:12579}`,ALL_PROXY:'',NO_PROXY:mode==='direct'?'*':'localhost,127.0.0.1,::1'});
+ const args=['--bare','--setting-sources','','--strict-mcp-config','--tools','','--disable-slash-commands','--no-session-persistence','--debug-file',path.join(dir,'debug.log'),'--model','claude-sonnet-4-5','--max-turns','1','--system-prompt','Network connectivity test.','-p','Reply OK.'];
+ const result=await new Promise(resolve=>{const p=spawn(exe,args,{cwd:dir,env,windowsHide:true,stdio:['ignore','pipe','pipe']});let output='',timedOut=false;const timer=setTimeout(()=>{timedOut=true;spawn('taskkill.exe',['/PID',String(p.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});},55000);p.stdout.on('data',c=>output+=c);p.stderr.on('data',c=>output+=c);p.on('error',e=>{clearTimeout(timer);resolve({mode,error:e.message});});p.on('close',code=>{clearTimeout(timer);fs.writeFileSync(path.join(dir,'output.txt'),output);resolve({mode,code,timedOut,output:output.slice(-1400)});});});
+ results.push(result);console.log(JSON.stringify(result));
+}
+fs.writeFileSync(path.join(root,process.argv[2]?'code-test-'+process.argv[2]+'.json':'code-tests.json'),JSON.stringify(results,null,2));

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+credential.xml
+secrets.json
+parameters-filled.json
+*.log

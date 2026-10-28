@@ -1,0 +1,33 @@
+param([switch]$Once)
+$ErrorActionPreference='Stop'
+$root=Split-Path -Parent $PSScriptRoot
+. (Join-Path $root 'Windows-Proxy.ps1')
+. (Join-Path $PSScriptRoot 'State.ps1')
+$mutex=[Threading.Mutex]::new($false,'Local\StaticProxySystemProxyGuard')
+if(-not $mutex.WaitOne(0)){exit 0}
+$events=Join-Path $PSScriptRoot 'events.jsonl'
+function Write-GuardEvent([string]$Kind,$Before,$After) {
+ if((Test-Path -LiteralPath $events) -and (Get-Item -LiteralPath $events).Length -gt 1048576){Move-Item -LiteralPath $events -Destination ($events+'.previous') -Force}
+ $entry=@{Time=(Get-Date).ToString('o');Kind=$Kind;Pid=$PID;Before=$Before;After=$After}
+ Add-Content -LiteralPath $events -Value ($entry | ConvertTo-Json -Depth 4 -Compress) -Encoding UTF8
+}
+$nextHeartbeat=[datetime]::MinValue
+try {
+ Write-GuardEvent 'Started' $null $null
+ do {
+  try {
+   $state=Get-ProxyGuardState
+   if(-not (Test-ProxyGuardState $state)) {
+    # Restore only WinINet configuration. Never stop cores, edit firewall, or use direct fallback.
+    [Proxy.WindowsProxy]::Set(3,$script:ExpectedServer,$script:ExpectedBypass,'')
+    $after=Get-ProxyGuardState
+    Write-GuardEvent $(if(Test-ProxyGuardState $after){'Restored'}else{'RestoreFailed'}) $state $after
+   }
+   if((Get-Date) -ge $nextHeartbeat) {
+    @{CheckedAt=(Get-Date).ToString('o');Pid=$PID;Healthy=(Test-ProxyGuardState (Get-ProxyGuardState));PollMilliseconds=500} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'status.json') -Encoding UTF8
+    $nextHeartbeat=(Get-Date).AddSeconds(30)
+   }
+  } catch {Write-GuardEvent 'Error' $_.Exception.GetType().Name $null}
+  if(-not $Once){Start-Sleep -Milliseconds 500}
+ } while(-not $Once)
+} finally {$mutex.ReleaseMutex();$mutex.Dispose()}

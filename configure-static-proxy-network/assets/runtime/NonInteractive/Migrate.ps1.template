@@ -1,0 +1,39 @@
+$ErrorActionPreference='Stop'
+$results=@()
+$baseline=Get-Content (Join-Path $PSScriptRoot 'listeners.before.json') -Raw -Encoding UTF8|ConvertFrom-Json
+function Check-Core {
+ $now=Get-NetTCPConnection -State Listen -LocalPort 12460,53,18791|Select-Object LocalPort,LocalAddress,OwningProcess
+ if(@(Compare-Object $baseline $now -Property LocalPort,LocalAddress,OwningProcess).Count){throw 'Core listener change detected; stopped migration'}
+}
+try {
+ $probe=Get-Content (Join-Path $PSScriptRoot 'probe-result.json') -Raw|ConvertFrom-Json
+ if(-not($probe.SessionId -eq 0 -and $probe.Credential -and $probe.Proxy -and $probe.Entry -and $probe.Registry)){throw 'Preflight failed'}
+ foreach($name in @('StaticProxy-Proxy','StaticProxy-DNS','Claude Model Router Watchdog','StaticProxy-SystemProxyGuard')){
+  Check-Core
+  $task=Get-ScheduledTask -TaskName $name
+  if($task.Actions.Count -ne 1 -or [IO.Path]::GetFileName($task.Actions[0].Execute) -ne 'powershell.exe'){throw 'Unexpected task action'}
+  if($task.Actions[0].Arguments -notmatch '-File\s+"([^"]+)"'){throw 'Cannot identify worker script'}
+  $script=$Matches[1]
+  $old=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'"|Where-Object {$_.SessionId -ne 0 -and $_.ExecutablePath -ieq $task.Actions[0].Execute -and $_.CommandLine -and $_.CommandLine.Contains('"'+$script+'"')})
+  if($old.Count -gt 1){throw 'Ambiguous worker instances'}
+  $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
+  Set-ScheduledTask -TaskName $name -Principal $principal|Out-Null
+  # Terminate only the identified wrapper, never task/process descendants.
+  foreach($p in $old){Stop-Process -Id $p.ProcessId -ErrorAction Stop}
+  for($i=0;$i -lt 30;$i++){
+   if((Get-ScheduledTask -TaskName $name).State -ne 'Running'){break}
+   Start-Sleep -Milliseconds 200
+  }
+  Start-ScheduledTask -TaskName $name
+  $new=@()
+  for($i=0;$i -lt 40;$i++){
+   $new=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'"|Where-Object {$_.SessionId -eq 0 -and $_.CommandLine -and $_.CommandLine.Contains('"'+$script+'"')})
+   if($new.Count -eq 1){break}; Start-Sleep -Milliseconds 250
+  }
+  if($new.Count -ne 1){throw ('No unique session-0 worker for '+$name)}
+  Check-Core
+  $results+=@{Task=$name;OldPids=@($old.ProcessId);Pid=$new[0].ProcessId;SessionId=$new[0].SessionId;State=[string](Get-ScheduledTask -TaskName $name).State}
+ }
+ @{Success=$true;Tasks=$results;CorePidsUnchanged=$true}|ConvertTo-Json -Depth 6|Set-Content (Join-Path $PSScriptRoot 'migration-result.json') -Encoding UTF8
+} catch {@{Success=$false;Error=$_.Exception.Message;Completed=$results}|ConvertTo-Json -Depth 6|Set-Content (Join-Path $PSScriptRoot 'migration-result.json') -Encoding UTF8}
+

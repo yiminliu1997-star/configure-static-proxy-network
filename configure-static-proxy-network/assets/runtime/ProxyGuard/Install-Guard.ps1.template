@@ -1,0 +1,20 @@
+$ErrorActionPreference='Stop'
+try {
+ $ctx=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'install-context.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+ $name='StaticProxy-SystemProxyGuard'
+ if(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue){throw 'Task already exists; inspect before replacement.'}
+ $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+ $args='-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'Guard.ps1')+'"'
+ $action=New-ScheduledTaskAction -Execute $exe -Argument $args
+ $trigger=New-ScheduledTaskTrigger -AtLogOn -User $ctx.User
+ $principal=New-ScheduledTaskPrincipal -UserId $ctx.User -LogonType S4U -RunLevel Limited
+ $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([timespan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+ Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Restores fixed Proxy WinINet settings on drift; never stops cores or enables direct fallback.' | Out-Null
+ Start-ScheduledTask -TaskName $name
+ @{Success=$true;Time=(Get-Date).ToString('o');Task=$name;RegistryAuditingInstalled=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'guard-install-result.json') -Encoding UTF8
+} catch {
+ @{Success=$false;Error=$_.Exception.Message;Time=(Get-Date).ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'guard-install-result.json') -Encoding UTF8
+ exit 1
+}
+
+

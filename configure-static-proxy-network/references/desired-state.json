@@ -1,0 +1,100 @@
+{
+  "baselineDate": "2026-10-23",
+  "rootHint": "C:\\StaticProxy",
+  "exitIp": null,
+  "upstream": {
+    "host": null,
+    "port": null,
+    "type": null,
+    "tls": null,
+    "serverName": null
+  },
+  "localProxy": "http://127.0.0.1:12460",
+  "noProxy": "localhost,127.0.0.1,::1",
+  "wininet": {
+    "flags": 3,
+    "server": "127.0.0.1:12460",
+    "bypass": "localhost;127.*;[::1];<local>",
+    "pac": "",
+    "autoDetect": false
+  },
+  "router": {
+    "port": 18791,
+    "rootHint": "%LOCALAPPDATA%\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\Claude-Model-Router",
+    "dedicatedNode": "EgressGuard\\runtime\\node.exe"
+  },
+  "tasks": [
+    "StaticProxy-Proxy",
+    "StaticProxy-DNS",
+    "Claude Model Router Watchdog",
+    "StaticProxy-SystemProxyGuard"
+  ],
+  "taskPolicy": {
+    "atLogon": true,
+    "runLevel": "Limited",
+    "logonType": "S4U",
+    "executionTimeLimit": "PT0S",
+    "restartInterval": "PT1M",
+    "minimumRestartCount": 3,
+    "workerSessionId": 0
+  },
+  "appFirewallGroup": "StaticProxy-Claude-Edge-EgressGuard-v1",
+  "protectedPrograms": [
+    "Claude Desktop",
+    "Claude Code",
+    "Edge",
+    "Chrome",
+    "dedicated Claude router Node"
+  ],
+  "nonLoopbackRanges": [
+    "0.0.0.0-126.255.255.255",
+    "128.0.0.0-255.255.255.255",
+    "::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+  ],
+  "dnsFirewallGroup": "StaticProxy-DnsGuard-v1",
+  "dns": {
+    "ipv4": "127.0.0.1",
+    "ipv6": "::1",
+    "port": 53,
+    "transport": [
+      "TCP",
+      "UDP"
+    ],
+    "dohIp": "1.1.1.1",
+    "dohServerName": "cloudflare-dns.com",
+    "dohPath": "/dns-query",
+    "blockedDirectPorts": [
+      53,
+      853
+    ],
+    "bootstrapDomain": null,
+    "bootstrapRefreshHours": 6,
+    "directFallback": false
+  },
+  "edgePolicies": {
+    "DnsOverHttpsMode": "off",
+    "NetworkPredictionOptions": 2
+  },
+  "claudeCodeEnv": {
+    "CLAUDE_CODE_PROXY_RESOLVES_HOSTS": "1"
+  },
+  "excludedFromAppRestrictions": [
+    "ToDesk",
+    "Codex",
+    "ChatGPT",
+    "shared Node",
+    "proxy-core.exe"
+  ],
+  "secretReferencesOnly": [
+    "credential.xml",
+    "Claude applied profile",
+    "Claude-Model-Router/secrets.json"
+  ],
+  "baselineCoreVersion": "1.13.14-reF1nd.1",
+  "baselineDedicatedNodeVersion": "v24.19.0",
+  "configurationStatus": "unconfigured: choose target exit and endpoint before use",
+  "exitCheck": {
+    "url": null,
+    "format": "JSON object with top-level ip string"
+  }
+}

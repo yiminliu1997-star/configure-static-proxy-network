@@ -1,0 +1,147 @@
+param([string]$Root, [switch]$LiveNetwork)
+$ErrorActionPreference='Stop'
+$desired=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\references\desired-state.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if(-not $Root){$Root=$desired.rootHint}
+$checks=[Collections.Generic.List[object]]::new()
+function Record([string]$Name,[bool]$Passed,[string]$Detail='') {
+ $checks.Add([pscustomobject]@{Name=$Name;Status=$(if($Passed){'pass'}else{'fail'});Detail=$Detail})
+}
+function Check([string]$Name,[scriptblock]$Body) {
+ try { & $Body } catch { $checks.Add([pscustomobject]@{Name=$Name;Status='unknown';Detail=('Read/check failed: '+$_.Exception.GetType().Name)}) }
+}
+function ReadJson([string]$Path){Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json}
+function SameSet($A,$B){@((Compare-Object @($A) @($B))).Count -eq 0}
+Check 'Files' {
+ foreach($file in @('credential.xml','proxy-core.exe','Control.ps1','Windows-Proxy.ps1','DnsGuard\dns-core.exe','DnsGuard\Worker.ps1','DnsGuard\bootstrap.json','DnsGuard\test-config.json','EgressGuard\runtime\node.exe','EgressGuard\targets.json')) {
+  Record ('File:'+ $file) (Test-Path -LiteralPath (Join-Path $Root $file) -PathType Leaf)
+ }
+}
+Check 'User environment' {
+ foreach($key in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {Record ('User:'+ $key) ([Environment]::GetEnvironmentVariable($key,'User') -eq $desired.localProxy)}
+ Record 'User:NO_PROXY' (SameSet ([Environment]::GetEnvironmentVariable('NO_PROXY','User') -split ',') ($desired.noProxy -split ','))
+ Record 'User:remote DNS' ([Environment]::GetEnvironmentVariable('CLAUDE_CODE_PROXY_RESOLVES_HOSTS','User') -eq '1')
+}
+Check 'WinINet' {
+ $inet=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+ $conn=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
+ Record 'WinINet:fixed proxy' ($inet.ProxyEnable -eq 1 -and $inet.ProxyServer -eq $desired.wininet.server)
+ Record 'WinINet:bypass' ($inet.ProxyOverride -eq $desired.wininet.bypass)
+ Record 'WinINet:no PAC' ([string]::IsNullOrEmpty($inet.AutoConfigURL))
+ Record 'WinINet:connection flags' ($conn.DefaultConnectionSettings.Length -gt 8 -and $conn.DefaultConnectionSettings[8] -eq 3)
+}
+Check 'Code settings' {
+ $s=ReadJson (Join-Path $env:USERPROFILE '.claude\settings.json')
+ foreach($key in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {Record ('Code:'+ $key) ($s.env.$key -eq $desired.localProxy)}
+ Record 'Code:remote DNS' ($s.env.CLAUDE_CODE_PROXY_RESOLVES_HOSTS -eq '1')
+ Record 'Code:NO_PROXY' (SameSet ($s.env.NO_PROXY -split ',') ($desired.noProxy -split ','))
+}
+Check 'Codex env' {
+ $lines=Get-Content -LiteralPath (Join-Path $env:USERPROFILE '.codex\.env') -Encoding UTF8
+ foreach($key in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')) {
+  $values=@($lines | Where-Object {$_ -match ('^\s*'+$key+'\s*=')} | ForEach-Object {($_ -split '=',2)[1].Trim().Trim('"').Trim("'")})
+  Record ('Codex:'+ $key) ($values.Count -eq 1 -and $values[0] -eq $desired.localProxy)
+ }
+}
+Check 'Claude applied profile' {
+ $lib=Join-Path $env:LOCALAPPDATA 'Claude-3p\configLibrary'
+ $meta=ReadJson (Join-Path $lib '_meta.json')
+ $profile=ReadJson (Join-Path $lib ($meta.appliedId+'.json'))
+ Record 'Desktop:fixed proxy' ($profile.egressProxyUrl -eq $desired.localProxy -and -not $profile.egressProxyPacUrl)
+}
+Check 'Tasks' {
+ foreach($name in $desired.tasks) {
+  $t=Get-ScheduledTask -TaskName $name
+  Record ('Task:'+ $name) ($t.Settings.Enabled -and $t.State -eq 'Running' -and $t.Settings.ExecutionTimeLimit -eq 'PT0S' -and $t.Principal.RunLevel -eq 'Limited' -and [string]$t.Principal.LogonType -eq $desired.taskPolicy.logonType -and $t.Settings.RestartCount -ge 3 -and $t.Settings.RestartInterval -eq 'PT1M' -and @($t.Triggers | Where-Object {$_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'}).Count -gt 0) 'Action paths and user identity require runbook review.'
+  if($t.Actions.Count -eq 1 -and $t.Actions[0].Arguments -match '-File\s+"([^"]+)"') {
+   $scriptPath=$Matches[1]
+   $workers=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object {$_.ExecutablePath -ieq $t.Actions[0].Execute -and $_.CommandLine -and $_.CommandLine.Contains('"'+$scriptPath+'"')})
+   $admin=([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+   if($workers.Count -eq 0 -and -not $admin) {
+    $checks.Add([pscustomobject]@{Name=('Task:noninteractive '+$name);Status='unknown';Detail='Session 0 process details require an elevated read-only audit.'})
+   } else {
+    Record ('Task:noninteractive '+$name) ($workers.Count -eq 1 -and $workers[0].SessionId -eq $desired.taskPolicy.workerSessionId) 'Session 0: no terminal on the user desktop.'
+   }
+  } else { Record ('Task:noninteractive '+$name) $false 'Unexpected task action; inspect before repair.' }
+ }
+}
+Check 'System proxy guard heartbeat' {
+ $s=ReadJson (Join-Path $Root 'ProxyGuard\status.json')
+ $age=((Get-Date)-[datetime]$s.CheckedAt).TotalSeconds
+ Record 'ProxyGuard:fresh healthy heartbeat' ($s.Healthy -and $age -ge 0 -and $age -lt 90)
+}
+Check 'Listeners' {
+ foreach($entry in @(@{Port=12460;Path=(Join-Path $Root 'proxy-core.exe')},@{Port=18791;Path=(Join-Path $Root 'EgressGuard\runtime\node.exe')},@{Port=53;Path=(Join-Path $Root 'DnsGuard\dns-core.exe')})) {
+  $ls=@(Get-NetTCPConnection -State Listen -LocalPort $entry.Port -ErrorAction SilentlyContinue)
+  $good=@($ls | Where-Object { $_.LocalAddress -in @('127.0.0.1','::1') -and (Get-Process -Id $_.OwningProcess).Path -eq $entry.Path })
+  Record ('Listener:TCP'+$entry.Port) ($good.Count -gt 0 -and $good.Count -eq $ls.Count)
+ }
+ foreach($addr in @('127.0.0.1','::1')) {
+  $u=@(Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | Where-Object LocalAddress -eq $addr)
+  Record ('DNS:UDP '+$addr) ($u.Count -gt 0 -and (Get-Process -Id $u[0].OwningProcess).Path -eq (Join-Path $Root 'DnsGuard\dns-core.exe'))
+ }
+}
+Check 'Firewall' {
+ Record 'Firewall:profiles' (@(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object Enabled -ne 'True').Count -eq 0)
+ $manifest=ReadJson (Join-Path $Root 'EgressGuard\targets.json')
+ Record 'Firewall:target count' (@($manifest.Targets).Count -ge 4) 'Compare manifest against installed/running versions separately.'
+ foreach($target in $manifest.Targets) {
+  $rule=Get-NetFirewallRule -PolicyStore ActiveStore -Name $target.RuleName
+  $app=$rule | Get-NetFirewallApplicationFilter
+  $addr=$rule | Get-NetFirewallAddressFilter
+  $port=$rule | Get-NetFirewallPortFilter
+  Record ('Firewall:'+ $target.Label) ($rule.Group -eq $desired.appFirewallGroup -and $rule.Enabled -eq 'True' -and $rule.Action -eq 'Block' -and $rule.Direction -eq 'Outbound' -and $rule.Profile -eq 'Any' -and $app.Program -eq $target.Path -and (Test-Path -LiteralPath $target.Path) -and $port.Protocol -eq 'Any' -and (SameSet $addr.RemoteAddress $desired.nonLoopbackRanges))
+ }
+ foreach($proto in @('TCP','UDP')) {
+  $rule=Get-NetFirewallRule -PolicyStore ActiveStore -Name ('ProxyDnsGuard-'+$proto)
+  $port=$rule | Get-NetFirewallPortFilter
+  $addr=$rule | Get-NetFirewallAddressFilter
+  $app=$rule | Get-NetFirewallApplicationFilter
+  Record ('DNS firewall:'+ $proto) ($rule.Group -eq $desired.dnsFirewallGroup -and $rule.Enabled -eq 'True' -and $rule.Action -eq 'Block' -and $rule.Direction -eq 'Outbound' -and $rule.Profile -eq 'Any' -and $port.Protocol -eq $proto -and $app.Program -eq 'Any' -and (SameSet $port.RemotePort @('53','853')) -and (SameSet $addr.RemoteAddress $desired.nonLoopbackRanges))
+ }
+ $rule=Get-NetFirewallRule -PolicyStore ActiveStore -Name 'ProxyDnsGuard-Core'
+ $app=$rule | Get-NetFirewallApplicationFilter
+ $addr=$rule | Get-NetFirewallAddressFilter
+ $port=$rule | Get-NetFirewallPortFilter
+ Record 'DNS firewall:core' ($rule.Group -eq $desired.dnsFirewallGroup -and $rule.Enabled -eq 'True' -and $rule.Action -eq 'Block' -and $rule.Direction -eq 'Outbound' -and $rule.Profile -eq 'Any' -and $port.Protocol -eq 'Any' -and $app.Program -eq (Join-Path $Root 'DnsGuard\dns-core.exe') -and (SameSet $addr.RemoteAddress $desired.nonLoopbackRanges))
+}
+Check 'Adapter DNS' {
+ $indices=@(Get-NetRoute -PolicyStore ActiveStore | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')} | Select-Object -ExpandProperty InterfaceIndex -Unique)
+ Record 'DNS:default route found' ($indices.Count -gt 0)
+ foreach($idx in $indices) {
+  foreach($family in @('IPv4','IPv6')) {
+   $d=Get-DnsClientServerAddress -InterfaceIndex $idx -AddressFamily $family
+   $expected=if($family -eq 'IPv4'){'127.0.0.1'}else{'::1'}
+   Record ('DNS:adapter '+$idx+' '+$family) (SameSet $d.ServerAddresses @($expected))
+  }
+ }
+}
+Check 'DNS config' {
+ $c=ReadJson (Join-Path $Root 'DnsGuard\dns-config.json')
+ $r=@($c.dns.servers | Where-Object tag -eq 'remote')
+ $p=@($c.outbounds | Where-Object tag -eq 'proxy-local')
+ $pins=ReadJson (Join-Path $Root 'DnsGuard\bootstrap.json')
+ Record 'DNS:DoH via local proxy' ($r.Count -eq 1 -and $r[0].type -eq 'https' -and $r[0].server -eq '1.1.1.1' -and $r[0].detour -eq 'proxy-local' -and $r[0].tls.enabled -eq $true -and $r[0].tls.server_name -eq 'cloudflare-dns.com' -and $c.dns.final -eq 'remote' -and $p.Count -eq 1 -and $p[0].server -eq '127.0.0.1' -and $p[0].server_port -eq 12460)
+ Record 'DNS:bootstrap present' (@($pins.Addresses).Count -gt 0) 'Reachability and loaded pins require separate test.'
+}
+Check 'Edge policies' {
+ $e=Get-ItemProperty 'HKCU:\Software\Policies\Microsoft\Edge'
+ Record 'Edge:system DNS and no prediction' ($e.DnsOverHttpsMode -eq 'off' -and $e.NetworkPredictionOptions -eq 2)
+}
+if($LiveNetwork) {
+ Check 'Live proxy' {
+  $r=Invoke-RestMethod -Uri '__PROXY_CHECK_URL__' -Proxy $desired.localProxy -TimeoutSec 20
+  Record 'Live:static exit' ($r.ip -eq $desired.exitIp) ('Observed: '+$r.ip)
+ }
+ Check 'Live router' {
+  $client=[Net.WebClient]::new(); $client.Proxy=$null
+  try {$r=$client.DownloadString('http://127.0.0.1:18791/proxy-check') | ConvertFrom-Json} finally {$client.Dispose()}
+  Record 'Live:router exit' ($r.exitIP -eq $desired.exitIp -and $r.proxyPeer.address -eq '127.0.0.1' -and $r.proxyPeer.port -eq 12460) 'Exact exit and local proxy peer verified.'
+ }
+ Check 'Live DNS' {
+  $v4=@(Resolve-DnsName -Name 'example.com' -Type A -Server '127.0.0.1' -DnsOnly -QuickTimeout)
+  $v6=@(Resolve-DnsName -Name 'example.com' -Type AAAA -Server '::1' -DnsOnly -TcpOnly -QuickTimeout)
+  Record 'Live:DNS IPv4 UDP/A' (@($v4 | Where-Object IPAddress).Count -gt 0)
+  Record 'Live:DNS IPv6 TCP/AAAA' (@($v6 | Where-Object IPAddress).Count -gt 0)
+ }
+}
+[pscustomobject]@{Time=(Get-Date).ToString('o');Root=$Root;ReadOnly=$true;LiveNetwork=[bool]$LiveNetwork;Passed=@($checks | Where-Object Status -eq 'pass').Count;Failed=@($checks | Where-Object Status -eq 'fail').Count;Unknown=@($checks | Where-Object Status -eq 'unknown').Count;Checks=@($checks);Remaining='Runbook: current app version coverage, live browser/API traffic, negative/fail-closed tests, DNS packet observation, real reboot. ToDesk excluded.'} | ConvertTo-Json -Depth 8

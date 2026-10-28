@@ -1,0 +1,5 @@
+$ErrorActionPreference='Stop'
+$script=Join-Path $PSScriptRoot 'Firewall.ps1'
+# Remove only the four egress guard rules. Keep the working proxy and router.
+Start-Process -FilePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$script+'" -Action Remove') -Wait
+Get-Content -LiteralPath (Join-Path $PSScriptRoot 'firewall-remove.json') -Raw -Encoding UTF8

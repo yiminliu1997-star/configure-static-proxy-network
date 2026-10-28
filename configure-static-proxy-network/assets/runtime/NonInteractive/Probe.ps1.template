@@ -1,0 +1,8 @@
+$ErrorActionPreference='Stop'
+$r=@{Time=(Get-Date).ToString('o');SessionId=(Get-Process -Id $PID).SessionId;Interactive=[Environment]::UserInteractive;Credential=$false;Proxy=$false;Entry=$false;Registry=$false}
+try {$c=Import-Clixml (Join-Path (Split-Path $PSScriptRoot -Parent) 'credential.xml');$r.Credential=($c.GetNetworkCredential().Password.Length -gt 0);$c=$null} catch {$r.CredentialError=$_.Exception.GetType().Name}
+try {$v=Invoke-RestMethod '__PROXY_CHECK_URL__' -Proxy 'http://127.0.0.1:12460' -TimeoutSec 15;$r.Proxy=($v.ip -eq '__PROXY_EXIT_IP__')} catch {$r.ProxyError=$_.Exception.GetType().Name}
+try {$root=Split-Path $PSScriptRoot -Parent; . (Join-Path $root 'DnsGuard\Verify-Entry.ps1'); $pins=Get-Content (Join-Path $root 'DnsGuard\bootstrap.json') -Raw|ConvertFrom-Json; if($r.Credential){$r.Entry=Test-ProxyEntry $pins.Addresses[0]}} catch {$r.EntryError=$_.Exception.GetType().Name}
+try {$v=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings';$r.Registry=($v.ProxyServer -eq '127.0.0.1:12460')} catch {$r.RegistryError=$_.Exception.GetType().Name}
+$r|ConvertTo-Json|Set-Content (Join-Path $PSScriptRoot 'probe-result.json') -Encoding UTF8
+

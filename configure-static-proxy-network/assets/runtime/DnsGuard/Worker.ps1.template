@@ -1,0 +1,54 @@
+$ErrorActionPreference='Stop'
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+$root=$PSScriptRoot
+$core=Join-Path $root 'dns-core.exe'
+$mutex=[Threading.Mutex]::new($false,'Local\StaticProxyDnsGuard')
+if(-not $mutex.WaitOne(0)){exit 0}
+$nextRefresh=Get-Date
+function Refresh-Bootstrap {
+ $literal=$null
+ if([Net.IPAddress]::TryParse('__PROXY_UPSTREAM_HOST__',[ref]$literal)){return}
+ $response=Invoke-RestMethod -Uri 'https://cloudflare-dns.com/dns-query?name=__PROXY_UPSTREAM_HOST__&type=A' -Proxy 'http://127.0.0.1:12460' -Headers @{Accept='application/dns-json'} -TimeoutSec 15
+ $valid=@()
+ foreach($answer in @($response.Answer | Where-Object type -eq 1)){
+  $ip=$null
+  if(-not [Net.IPAddress]::TryParse([string]$answer.data,[ref]$ip) -or $ip.AddressFamily -ne 'InterNetwork'){continue}
+  . (Join-Path $root 'Verify-Entry.ps1')
+  if(Test-ProxyEntry $ip.ToString()){$valid+=$ip.ToString()}
+  if($valid.Count -ge 3){break}
+ }
+ if($valid.Count -eq 0){throw 'No reachable exit-verified bootstrap addresses; retained last known good addresses.'}
+ $json=@{Addresses=$valid;RefreshedAt=(Get-Date).ToString('o');Source='DoH via Proxy; authenticated exit verified on port __PROXY_UPSTREAM_PORT__'} | ConvertTo-Json
+ [IO.File]::WriteAllText((Join-Path $root 'bootstrap.next.json'),$json,[Text.UTF8Encoding]::new($false))
+ Move-Item -LiteralPath (Join-Path $root 'bootstrap.next.json') -Destination (Join-Path $root 'bootstrap.json') -Force
+}
+try {
+ while($true){
+  try {
+   $listener=Get-NetUDPEndpoint -LocalPort 53 -ErrorAction SilentlyContinue | Where-Object LocalAddress -eq '127.0.0.1'
+   if(-not $listener){
+    $config=Get-Content -LiteralPath (Join-Path $root 'test-config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pins=Get-Content -LiteralPath (Join-Path $root 'bootstrap.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $config.dns.servers[0].predefined.'__PROXY_UPSTREAM_HOST__'=@($pins.Addresses)
+    $config.inbounds=@([pscustomobject]@{type='direct';tag='dns-in';listen='127.0.0.1';listen_port=53},[pscustomobject]@{type='direct';tag='dns-in-v6';listen='::1';listen_port=53})
+    $config.route.rules[0].inbound=@('dns-in','dns-in-v6')
+    $file=Join-Path $root 'dns-config.json'
+    [IO.File]::WriteAllText($file,($config | ConvertTo-Json -Depth 15),[Text.UTF8Encoding]::new($false))
+    & $core check -c $file 2>&1 | Out-Null
+    if($LASTEXITCODE -ne 0){throw 'DNS configuration validation failed'}
+    $process=Start-Process -FilePath $core -ArgumentList @('run','-c',('"'+$file+'"'),'--disable-color') -WindowStyle Hidden -PassThru -RedirectStandardError (Join-Path $root 'dns-error.log')
+    $process.Id | Set-Content -LiteralPath (Join-Path $root 'dns.pid') -Encoding ASCII
+    Start-Sleep -Milliseconds 500
+   } else {
+    $owner=Get-Process -Id $listener.OwningProcess -ErrorAction Stop
+    if($owner.Path -ne $core){throw 'DNS port is occupied by another program'}
+   }
+   if((Get-Date) -ge $nextRefresh){
+    $nextRefresh=(Get-Date).AddHours(6)
+    try {Refresh-Bootstrap} catch {$nextRefresh=(Get-Date).AddMinutes(10);$_.Exception.Message | Set-Content -LiteralPath (Join-Path $root 'bootstrap-refresh-error.txt') -Encoding UTF8}
+   }
+   @{CheckedAt=(Get-Date).ToString('o');WorkerPid=$PID;NextBootstrapRefresh=$nextRefresh.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'worker-status.json') -Encoding UTF8
+  } catch { ((Get-Date).ToString('o')+' '+$_.Exception.Message) | Set-Content -LiteralPath (Join-Path $root 'worker-error.txt') -Encoding UTF8 }
+  Start-Sleep -Seconds 3
+ }
+} finally {$mutex.ReleaseMutex();$mutex.Dispose()}
