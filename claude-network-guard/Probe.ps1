@@ -1,5 +1,6 @@
 param([string]$OutputPath,[switch]$Quarantined)
 . "$PSScriptRoot\Common.ps1"
+. "$PSScriptRoot\ExitPolicy.ps1"
 $checks=[Collections.Generic.List[object]]::new()
 $diagnostic=@{User=[Security.Principal.WindowsIdentity]::GetCurrent().Name;Sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;EdgeHKCU=(Test-Path 'HKCU:\Software\Policies\Microsoft\Edge');EdgeHKU=(Test-Path ('Registry::HKEY_USERS\'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value+'\Software\Policies\Microsoft\Edge'))}
 $diagnostic.Is64Bit=[Environment]::Is64BitProcess
@@ -13,6 +14,7 @@ try{
   $checks.Add($c)
  }
  $desired=Read-Json $Config.DesiredPath
+ $null=Get-ExitCheck 'Expected exit configuration' $null $desired.exitIp
  Add-Type -AssemblyName System.Net.Http
  function Fetch($Url,$Proxy,[int]$TimeoutSeconds=6){
   for($attempt=1;$attempt -le 2;$attempt++){
@@ -32,8 +34,16 @@ try{
    }finally{$client.Dispose();$handler.Dispose()}
   }
  }
- try{$r=Fetch $desired.exitCheck.url $desired.localProxy;Add-Check 'Live:static exit' ($r.ip -eq $desired.exitIp) ('Observed '+$r.ip)}catch{Add-Check 'Live:static exit' $false $_.Exception.Message}
- if(-not $Quarantined){try{$r=Fetch 'http://127.0.0.1:18791/proxy-check' '';Add-Check 'Live:router exit' ($r.exitIP -eq $desired.exitIp -and $r.proxyPeer.port -eq 12460)}catch{Add-Check 'Live:router exit' $false $_.Exception.Message}}
+ try{$r=Fetch $desired.exitCheck.url $desired.localProxy;$checks.Add((Get-ExitCheck 'Live:static exit' $r.ip $desired.exitIp))}catch{
+  $checks.Add([pscustomobject]@{Name='Live:static exit';Status='warning';Detail=('Exit check unavailable: '+$_.Exception.Message)})
+ }
+ if(-not $Quarantined){
+  try{
+   $r=Fetch 'http://127.0.0.1:18791/proxy-check' ''
+   $checks.Add((Get-ExitCheck 'Live:router exit' $r.exitIP $desired.exitIp))
+   Add-Check 'Live:router proxy peer' ($r.proxyPeer.port -eq 12460)
+  }catch{$checks.Add([pscustomobject]@{Name='Live:router exit';Status='warning';Detail=('Exit check unavailable: '+$_.Exception.Message)})}
+ }
  foreach($entry in @(@{Type='A';Server='127.0.0.1'},@{Type='AAAA';Server='::1'})){
   try{$r=@(Resolve-DnsName example.com -Type $entry.Type -Server $entry.Server -DnsOnly -QuickTimeout -ErrorAction Stop);Add-Check ('DNS query '+$entry.Type) (@($r | Where-Object IPAddress).Count -gt 0)}catch{Add-Check ('DNS query '+$entry.Type) $false $_.Exception.Message}
  }
@@ -49,5 +59,6 @@ try{
  $code=Read-Json (Join-Path $env:USERPROFILE '.claude\settings.json')
  Add-Check 'Code auto-update disabled' ($code.env.DISABLE_AUTOUPDATER -eq '1')
 }catch{Add-Check 'Probe exception' $false $_.Exception.Message}
-$fail=@($checks | Where-Object {$_.Status -notin @('pass','quarantined')})
-Write-Json $OutputPath @{At=[datetime]::UtcNow.ToString('o');Healthy=($fail.Count -eq 0);Quarantined=[bool]$Quarantined;ExpectedExit=$desired.exitIp;Checks=@($checks);Failures=@($fail | ForEach-Object {$_.Name+': '+$_.Detail});SessionId=(Get-Process -Id $PID).SessionId;Pid=$PID}
+$summary=Get-HealthSummary $checks
+foreach($warning in $summary.Warnings){Write-Event 'exit-warning' $warning}
+Write-Json $OutputPath @{At=[datetime]::UtcNow.ToString('o');Healthy=$summary.Healthy;Quarantined=[bool]$Quarantined;ExpectedExit=$desired.exitIp;Checks=@($checks);Failures=$summary.Failures;Warnings=$summary.Warnings;SessionId=(Get-Process -Id $PID).SessionId;Pid=$PID}
