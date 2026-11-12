@@ -1,0 +1,13 @@
+{
+  "User": "COMPUTER\\ExampleUser",
+  "PowerShell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "RuntimeRoot": "C:\\StaticProxy",
+  "DedicatedNode": "C:\\StaticProxy\\EgressGuard\\runtime\\node.exe",
+  "CodeRoot": "C:\\Users\\ExampleUser\\AppData\\Local\\Claude-3p\\claude-code",
+  "GuardTask": "ClaudeNetworkGuard-Monitor",
+  "SupervisorTask": "ClaudeNetworkGuard-Supervisor",
+  "RouterTask": "Claude Model Router Watchdog",
+  "RouterLauncher": "C:\\StaticProxy\\Claude-Model-Router\\launch-watchdog.ps1",
+  "AuditScript": "C:\\ConfiguredSkill\\scripts\\Audit-State.ps1",
+  "DesiredPath": "C:\\ConfiguredSkill\\references\\desired-state.json"
+}

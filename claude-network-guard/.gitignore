@@ -1,0 +1,9 @@
+/config.json
+/state/
+/backup-*/
+/test-state-*/
+/test-io-*/
+/native-test-*/
+/*-tests.json
+/test-results.json
+/*.exe

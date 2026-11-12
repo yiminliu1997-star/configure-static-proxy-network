@@ -29,6 +29,8 @@ python configure-static-proxy-network/scripts/materialize.py --exit-ip <你的�
 
 详情见 [Skill 入口](configure-static-proxy-network/SKILL.md) 和 [参数说明](configure-static-proxy-network/references/parameterization.md)。
 
+[Claude 网络守护 v1.0](claude-network-guard/README.md) 提供状态窗口、后台核验和异常锁定，适用于已部署的代理环境。该目录包含源码和 Windows 构建说明。
+
 ## 部署边界
 
 这是供代理助手适配的模板集，不是一键安装器。`ExampleUser`、`__CURRENT_USER_SID__`、路径、应用版本和网卡信息须按目标机器替换；`.template` 不能直接执行。白名单免密、其他隧道协议与 IPv6 入口需要另行适配。
