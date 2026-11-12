@@ -13,7 +13,20 @@ static class Data {
  public static readonly string Root=AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
  public static readonly string State=Path.Combine(Root,"state");
  static JavaScriptSerializer Serializer(){return new JavaScriptSerializer{MaxJsonLength=2097152};}
- public static Dictionary<string,object> Read(string path){using(var f=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))using(var r=new StreamReader(f,Encoding.UTF8)){return (Dictionary<string,object>)Serializer().DeserializeObject(r.ReadToEnd());}}
+ public static Dictionary<string,object> Read(string path){
+  for(int attempt=0;;attempt++){
+   try{
+    using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+    using(var reader=new StreamReader(stream,Encoding.UTF8)){
+     return (Dictionary<string,object>)Serializer().DeserializeObject(reader.ReadToEnd());
+    }
+   }catch(IOException error){
+    int code=error.HResult&65535;
+    if((code!=2&&code!=32&&code!=33)||attempt>=20)throw;
+    Thread.Sleep(50);
+   }
+  }
+ }
  public static string Text(IDictionary<string,object> d,string k){object v;return d!=null&&d.TryGetValue(k,out v)&&v!=null?Convert.ToString(v):"";}
  public static bool Flag(IDictionary<string,object> d,string k){object v;return d!=null&&d.TryGetValue(k,out v)&&v is bool&&(bool)v;}
  public static bool Fresh(IDictionary<string,object> d,int seconds){DateTime t;if(!DateTime.TryParse(Text(d,"At"),null,System.Globalization.DateTimeStyles.RoundtripKind,out t))return false;double age=(DateTime.UtcNow-t.ToUniversalTime()).TotalSeconds;return age>=-5&&age<=seconds;}

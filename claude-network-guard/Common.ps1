@@ -3,10 +3,25 @@ $script:AppRoot=$PSScriptRoot
 $script:StateRoot=Join-Path $AppRoot 'state'
 $script:Config=Get-Content (Join-Path $AppRoot 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 function Read-Json([string]$Path){
- # Readers must permit atomic replacement; Get-Content may hold a handle without FILE_SHARE_DELETE.
- $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
- $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
- try{return ($reader.ReadToEnd() | ConvertFrom-Json)}finally{$reader.Dispose();$stream.Dispose()}
+ # Replacement can briefly hide or lock the destination even with delete sharing.
+ for($attempt=0;;$attempt++){
+  $stream=$null
+  $reader=$null
+  try{
+   $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+   $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+   return ($reader.ReadToEnd() | ConvertFrom-Json)
+  }catch{
+   $cause=$_.Exception
+   while($cause.InnerException){$cause=$cause.InnerException}
+   $code=$cause.HResult -band 65535
+   if($cause -isnot [IO.IOException] -or $code -notin @(2,32,33) -or $attempt -ge 20){throw}
+  }finally{
+   if($reader){$reader.Dispose()}
+   if($stream){$stream.Dispose()}
+  }
+  Start-Sleep -Milliseconds 50
+ }
 }
 function Write-Json([string]$Path,$Value){
  $temp=$Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
