@@ -14,12 +14,23 @@ try{
  }
  $desired=Read-Json $Config.DesiredPath
  Add-Type -AssemblyName System.Net.Http
- function Fetch($Url,$Proxy){
-  $handler=New-Object Net.Http.HttpClientHandler
-  $handler.UseProxy=[bool]$Proxy
-  if($Proxy){$handler.Proxy=New-Object Net.WebProxy($Proxy)}
-  $client=New-Object Net.Http.HttpClient($handler);$client.Timeout=[timespan]::FromSeconds(6)
-  try{return ($client.GetStringAsync($Url).GetAwaiter().GetResult() | ConvertFrom-Json)}finally{$client.Dispose();$handler.Dispose()}
+ function Fetch($Url,$Proxy,[int]$TimeoutSeconds=6){
+  for($attempt=1;$attempt -le 2;$attempt++){
+   $handler=New-Object Net.Http.HttpClientHandler
+   $handler.UseProxy=[bool]$Proxy
+   if($Proxy){$handler.Proxy=New-Object Net.WebProxy($Proxy)}
+   $client=New-Object Net.Http.HttpClient($handler)
+   $client.Timeout=[timespan]::FromSeconds($TimeoutSeconds)
+   try{
+    return ($client.GetStringAsync($Url).GetAwaiter().GetResult() | ConvertFrom-Json)
+   }catch{
+    $cause=$_.Exception
+    while($cause.InnerException){$cause=$cause.InnerException}
+    if($cause -isnot [OperationCanceledException]){throw}
+    if($attempt -eq 2){throw "Health request timed out twice ($TimeoutSeconds seconds per attempt)"}
+    Write-Event 'probe-retry' ('Health request timed out; verifying again: '+([uri]$Url).Host)
+   }finally{$client.Dispose();$handler.Dispose()}
+  }
  }
  try{$r=Fetch $desired.exitCheck.url $desired.localProxy;Add-Check 'Live:static exit' ($r.ip -eq $desired.exitIp) ('Observed '+$r.ip)}catch{Add-Check 'Live:static exit' $false $_.Exception.Message}
  if(-not $Quarantined){try{$r=Fetch 'http://127.0.0.1:18791/proxy-check' '';Add-Check 'Live:router exit' ($r.exitIP -eq $desired.exitIp -and $r.proxyPeer.port -eq 12460)}catch{Add-Check 'Live:router exit' $false $_.Exception.Message}}
