@@ -1,4 +1,4 @@
-# 通用静态代理环境 Skill
+﻿# 通用静态代理环境 Skill
 
 为 Windows 配置、迁移和核验固定代理出口的 Codex Skill，不绑定代理提供商。
 
@@ -29,7 +29,7 @@ python configure-static-proxy-network/scripts/materialize.py --exit-ip <你的�
 
 详情见 [Skill 入口](configure-static-proxy-network/SKILL.md) 和 [参数说明](configure-static-proxy-network/references/parameterization.md)。
 
-[Claude 网络守护 v1.0](claude-network-guard/README.md) 提供状态窗口、后台核验和异常锁定，适用于已部署的代理环境。该目录包含源码和 Windows 构建说明。
+[Claude 网络守护 v1.1](claude-network-guard/README.md) 提供状态窗口、后台核验和异常锁定，适用于已部署的代理环境。该目录包含源码和 Windows 构建说明。
 
 ## 部署边界
 

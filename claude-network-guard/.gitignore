@@ -7,3 +7,9 @@
 /*-tests.json
 /test-results.json
 /*.exe
+*.obj
+*.exe
+/LoopbackGuard/targets.tsv
+/LoopbackGuard/*.log
+/ui-categories-*.png
+/ui-categories-tests.json

@@ -1,6 +1,7 @@
-param([string]$OutputPath,[switch]$Quarantined)
+﻿param([string]$OutputPath,[switch]$Quarantined)
 . "$PSScriptRoot\Common.ps1"
 . "$PSScriptRoot\ExitPolicy.ps1"
+. "$PSScriptRoot\WebRtcChecks.ps1"
 $checks=[Collections.Generic.List[object]]::new()
 $diagnostic=@{User=[Security.Principal.WindowsIdentity]::GetCurrent().Name;Sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;EdgeHKCU=(Test-Path 'HKCU:\Software\Policies\Microsoft\Edge');EdgeHKU=(Test-Path ('Registry::HKEY_USERS\'+[Security.Principal.WindowsIdentity]::GetCurrent().User.Value+'\Software\Policies\Microsoft\Edge'))}
 $diagnostic.Is64Bit=[Environment]::Is64BitProcess
@@ -48,6 +49,9 @@ try{
   try{$r=@(Resolve-DnsName example.com -Type $entry.Type -Server $entry.Server -DnsOnly -QuickTimeout -ErrorAction Stop);Add-Check ('DNS query '+$entry.Type) (@($r | Where-Object IPAddress).Count -gt 0)}catch{Add-Check ('DNS query '+$entry.Type) $false $_.Exception.Message}
  }
  $targets=(Read-Json (Join-Path $Config.RuntimeRoot 'EgressGuard\targets.json')).Targets
+ foreach($check in @(Get-WebRtcChecks)){$checks.Add($check)}
+ . "$PSScriptRoot\LoopbackChecks.ps1"
+ foreach($check in @(Get-LoopbackChecks)){$checks.Add($check)}
  $packages=@(Get-AppxPackage 'Claude')
  Add-Check 'Desktop package discovery' ($packages.Count -gt 0)
  $installed=@($packages | ForEach-Object {Get-ChildItem -LiteralPath (Join-Path $_.InstallLocation 'app') -Recurse -Filter *.exe -File -ErrorAction Stop | ForEach-Object {$_.FullName}})

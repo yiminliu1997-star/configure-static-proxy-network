@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) {
     throw 'The x64 .NET Framework C# compiler is required.'
@@ -23,3 +23,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "C# compilation failed with exit code $LASTEXITCODE."
 }
 New-Item -ItemType Directory -Path "$PSScriptRoot\state" -Force | Out-Null
+Copy-Item "$PSScriptRoot\ClaudeNetworkGuard.exe" "$PSScriptRoot\ClaudeNetworkGuard.UI.exe" -Force
